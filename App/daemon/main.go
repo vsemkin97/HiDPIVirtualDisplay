@@ -345,7 +345,17 @@ func injectPID(pid int) error {
 	return nil
 }
 
+func isG9HelperRunning() bool {
+	out, err := exec.Command("pgrep", "-f", "HiDPIDisplay").Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
+}
+
 func runDaemon() {
+	if !isG9HelperRunning() {
+		fmt.Println("[!] G9 Helper (HiDPIDisplay) is not running. Exiting.")
+		return
+	}
+
 	fmt.Println("[*] G9 Helper Seamless Fullscreen native daemon started. Monitoring browsers...")
 
 	injectedPIDs := make(map[int]bool)
@@ -364,6 +374,12 @@ func runDaemon() {
 			fmt.Println("[*] Seamless Fullscreen daemon shutting down.")
 			return
 		case <-ticker.C:
+			// Automatically exit if G9 Helper was closed or quit
+			if !isG9HelperRunning() {
+				fmt.Println("[*] G9 Helper stopped. Seamless Fullscreen daemon exiting.")
+				return
+			}
+
 			targets := findTargetPIDs()
 			activePIDs := make(map[int]bool)
 			for _, t := range targets {
