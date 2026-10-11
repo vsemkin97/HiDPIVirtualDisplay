@@ -56,9 +56,13 @@ def find_target_pids():
             if len(parts) < 2:
                 continue
             pid_str, cmd = parts[0], parts[1]
+            if cmd.startswith("/System/"):
+                continue
+            exe = cmd.split(" --")[0].strip()
+            exe_name = os.path.basename(exe)
             for target in TARGET_PROCESS_NAMES:
                 # Target the main executable only, avoiding Helper / renderer processes
-                if target in cmd and "Helper" not in cmd and "crashpad" not in cmd and "renderer" not in cmd:
+                if (exe_name == target or f"/{target}.app/" in cmd) and "Helper" not in cmd and "crashpad" not in cmd and "renderer" not in cmd:
                     try:
                         pids.append((int(pid_str), target))
                     except ValueError:
@@ -93,6 +97,8 @@ def inject_pid(pid):
         void* (*fn_getImp)(void*) = (void*(*)(void*))method_getImplementation;
         void* (*fn_setImp)(void*, void*) = (void*(*)(void*, void*))method_setImplementation;
         void* (*fn_blockImp)(id) = (void*(*)(id))imp_implementationWithBlock;
+        BOOL (*fn_addMethod)(void*, SEL, void*, const char*) = (BOOL(*)(void*, SEL, void*, const char*))class_addMethod;
+        void (*fn_exchange)(void*, void*) = (void(*)(void*, void*))method_exchangeImplementations;
         char* (*fn_strstr)(const char*, const char*) = (char*(*)(const char*, const char*))dlsym((void*)-2, "strstr");
 
         auto hook = [&](const char *clsName, const char *selName, id blk) {
@@ -126,6 +132,8 @@ def inject_pid(pid):
              (id)^(id _self) { return (BOOL)0; });
         hook("_NSTitlebarDecorationView", "drawsBottomSeparator",
              (id)^(id _self) { return (BOOL)0; });
+        hook("_NSTitlebarDecorationView", "setDrawsBottomSeparator:",
+             (id)^(id _self, BOOL flag) { /* no-op */ });
         hook("_NSTitlebarDecorationView", "_updateBottomSeparatorLayer",
              (id)^(id _self) { /* no-op */ });
         hook("NSToolbarFullScreenWindow", "hasShadow",
@@ -193,108 +201,80 @@ def inject_pid(pid):
                  return (long)0;
              });
 
-        // Helper lambda to order out toolbar and overlay companion windows that create the 1-pixel seam
-        auto hideOverlayWindows = [&]() {
-            id curApp = ((id(*)(id, SEL))objc_msgSend)((id)fn_getClass("NSApplication"), fn_sel("sharedApplication"));
-            if (!curApp) return;
-            id allWins = ((id(*)(id, SEL))objc_msgSend)(curApp, fn_sel("windows"));
-            if (!allWins) return;
-            unsigned long wCount = ((unsigned long(*)(id, SEL))objc_msgSend)(allWins, fn_sel("count"));
-            for (unsigned long i = 0; i < wCount; i++) {
-                id curW = ((id(*)(id, SEL, unsigned long))objc_msgSend)(allWins, fn_sel("objectAtIndex:"), i);
-                if (curW) {
-                    id cNameObj = ((id(*)(id, SEL))objc_msgSend)(curW, fn_sel("className"));
-                    const char *cNameStr = cNameObj ? (const char*)((id(*)(id, SEL))objc_msgSend)(cNameObj, fn_sel("UTF8String")) : 0;
-                    if (cNameStr && (fn_strstr(cNameStr, "NSToolbarFullScreenWindow") || fn_strstr(cNameStr, "NativeWidgetMacOverlayNSWindow"))) {
-                        ((void(*)(id, SEL, SEL, id, BOOL))objc_msgSend)(
-                            curW,
-                            fn_sel("performSelectorOnMainThread:withObject:waitUntilDone:"),
-                            fn_sel("orderOut:"),
-                            nil,
-                            NO
-                        );
+        // 6. Safe setLevel: swizzle via method_exchangeImplementations and objc_msgSend
+        void *clsWindow = fn_getClass("NSWindow");
+        SEL sSetLevel = fn_sel("setLevel:");
+        SEL sOrigSetLevel = fn_sel("__g9_orig_setLevel:");
+
+        id blkLevel = (id)^(id _self, long lvl) {
+            SEL (*f_sel)(const char*) = (SEL(*)(const char*))dlsym((void*)-2, "sel_registerName");
+            long mask = ((long(*)(id, SEL))objc_msgSend)(_self, f_sel("styleMask"));
+            long targetLvl = (mask & (1 << 14)) ? 100 : lvl;
+            ((void(*)(id, SEL, long))objc_msgSend)(_self, f_sel("__g9_orig_setLevel:"), targetLvl);
+        };
+
+        void *newImp = fn_blockImp(blkLevel);
+        if (fn_addMethod(clsWindow, sOrigSetLevel, newImp, "v@:q")) {
+            void *m1 = fn_getMethod(clsWindow, sSetLevel);
+            void *m2 = fn_getMethod(clsWindow, sOrigSetLevel);
+            if (m1 && m2) fn_exchange(m1, m2);
+        }
+
+        // 7. Fullscreen lifecycle observers via NSNotificationCenter (zero private method interference)
+        id g9_nc = ((id(*)(id, SEL))objc_msgSend)((id)fn_getClass("NSNotificationCenter"), fn_sel("defaultCenter"));
+        id g9_opQueue = ((id(*)(id, SEL))objc_msgSend)((id)fn_getClass("NSOperationQueue"), fn_sel("mainQueue"));
+        id g9_noteEnter = ((id(*)(id, SEL, const char*))objc_msgSend)((id)fn_getClass("NSString"), fn_sel("stringWithUTF8String:"), "NSWindowDidEnterFullScreenNotification");
+        id g9_noteExit = ((id(*)(id, SEL, const char*))objc_msgSend)((id)fn_getClass("NSString"), fn_sel("stringWithUTF8String:"), "NSWindowDidExitFullScreenNotification");
+
+        id g9_blkEnter = (id)^(id g9_note) {
+            void* (*f_getClass)(const char*) = (void*(*)(const char*))dlsym((void*)-2, "objc_getClass");
+            SEL (*f_sel)(const char*) = (SEL(*)(const char*))dlsym((void*)-2, "sel_registerName");
+            char* (*f_strstr)(const char*, const char*) = (char*(*)(const char*, const char*))dlsym((void*)-2, "strstr");
+
+            id g9_targetWin = ((id(*)(id, SEL))objc_msgSend)(g9_note, f_sel("object"));
+            if (g9_targetWin) {
+                ((void(*)(id, SEL, long))objc_msgSend)(g9_targetWin, f_sel("setLevel:"), 100);
+                ((void(*)(id, SEL))objc_msgSend)(g9_targetWin, f_sel("orderFrontRegardless"));
+            }
+
+            // Hide companion & overlay windows that cause the 1-pixel seam
+            id g9_curApp = ((id(*)(id, SEL))objc_msgSend)((id)f_getClass("NSApplication"), f_sel("sharedApplication"));
+            if (g9_curApp) {
+                id g9_allWins = ((id(*)(id, SEL))objc_msgSend)(g9_curApp, f_sel("windows"));
+                if (g9_allWins) {
+                    unsigned long g9_numWins = ((unsigned long(*)(id, SEL))objc_msgSend)(g9_allWins, f_sel("count"));
+                    for (unsigned long g9_i = 0; g9_i < g9_numWins; g9_i++) {
+                        id g9_curW = ((id(*)(id, SEL, unsigned long))objc_msgSend)(g9_allWins, f_sel("objectAtIndex:"), g9_i);
+                        if (g9_curW) {
+                            id g9_cName = ((id(*)(id, SEL))objc_msgSend)(g9_curW, f_sel("className"));
+                            const char *g9_cStr = g9_cName ? (const char*)((id(*)(id, SEL))objc_msgSend)(g9_cName, f_sel("UTF8String")) : 0;
+                            if (g9_cStr && (f_strstr(g9_cStr, "NSToolbarFullScreenWindow") || f_strstr(g9_cStr, "NativeWidgetMacOverlayNSWindow"))) {
+                                ((void(*)(id, SEL, SEL, id, BOOL))objc_msgSend)(
+                                    g9_curW,
+                                    f_sel("performSelectorOnMainThread:withObject:waitUntilDone:"),
+                                    f_sel("orderOut:"),
+                                    nil,
+                                    NO
+                                );
+                            }
+                        }
                     }
                 }
             }
         };
 
-        // 6. Hook setLevel: to automatically keep fullscreen windows elevated to layer 100
-        void *clsWindow = fn_getClass("NSWindow");
-        SEL sLevel = fn_sel("setLevel:");
-        void *mLevel = fn_getMethod(clsWindow, sLevel);
-        if (mLevel) {
-            void *origSetLevel = fn_getImp(mLevel);
-            id blkLevel = (id)^(id _self, long lvl) {
-                long mask = ((long(*)(id, SEL))objc_msgSend)(_self, fn_sel("styleMask"));
-                if (mask & (1 << 14)) { // NSWindowStyleMaskFullScreen
-                    ((void(*)(id, SEL, long))origSetLevel)(_self, sLevel, 100);
-                } else {
-                    ((void(*)(id, SEL, long))origSetLevel)(_self, sLevel, lvl);
-                }
-            };
-            void *newImp = fn_blockImp(blkLevel);
-            fn_setImp(mLevel, newImp);
-        }
+        id g9_blkExit = (id)^(id g9_note) {
+            SEL (*f_sel)(const char*) = (SEL(*)(const char*))dlsym((void*)-2, "sel_registerName");
+            id g9_targetWin = ((id(*)(id, SEL))objc_msgSend)(g9_note, f_sel("object"));
+            if (g9_targetWin) {
+                ((void(*)(id, SEL, long))objc_msgSend)(g9_targetWin, f_sel("setLevel:"), 0);
+            }
+        };
 
-        // 7. Swizzle _didEnterFullScreen to immediately elevate and order front when entering fullscreen
-        SEL sDidEnter = fn_sel("_didEnterFullScreen");
-        void *mDidEnter = fn_getMethod(clsWindow, sDidEnter);
-        if (mDidEnter) {
-            void *origDidEnter = fn_getImp(mDidEnter);
-            id blkDidEnter = (id)^(id _self) {
-                ((void(*)(id, SEL))origDidEnter)(_self, sDidEnter);
-                ((void(*)(id, SEL, long))objc_msgSend)(_self, fn_sel("setLevel:"), 100);
-                ((void(*)(id, SEL, SEL, id, BOOL))objc_msgSend)(
-                    _self,
-                    fn_sel("performSelectorOnMainThread:withObject:waitUntilDone:"),
-                    fn_sel("orderFrontRegardless"),
-                    nil,
-                    NO
-                );
-                hideOverlayWindows();
-            };
-            void *newImp = fn_blockImp(blkDidEnter);
-            fn_setImp(mDidEnter, newImp);
-        }
+        ((void(*)(id, SEL, id, id, id, id))objc_msgSend)(g9_nc, fn_sel("addObserverForName:object:queue:usingBlock:"), g9_noteEnter, nil, g9_opQueue, g9_blkEnter);
+        ((void(*)(id, SEL, id, id, id, id))objc_msgSend)(g9_nc, fn_sel("addObserverForName:object:queue:usingBlock:"), g9_noteExit, nil, g9_opQueue, g9_blkExit);
 
-        // 8. Swizzle _didExitFullScreen to restore normal window level (0)
-        SEL sDidExit = fn_sel("_didExitFullScreen");
-        void *mDidExit = fn_getMethod(clsWindow, sDidExit);
-        if (mDidExit) {
-            void *origDidExit = fn_getImp(mDidExit);
-            id blkDidExit = (id)^(id _self) {
-                ((void(*)(id, SEL))origDidExit)(_self, sDidExit);
-                ((void(*)(id, SEL, long))objc_msgSend)(_self, fn_sel("setLevel:"), 0);
-            };
-            void *newImp = fn_blockImp(blkDidExit);
-            fn_setImp(mDidExit, newImp);
-        }
-
-        // 9. Swizzle setFrame:display: so resizes while in fullscreen maintain layer 100
-        SEL sSetFrame = fn_sel("setFrame:display:");
-        void *mSetFrame = fn_getMethod(clsWindow, sSetFrame);
-        if (mSetFrame) {
-            void *origSetFrame = fn_getImp(mSetFrame);
-            id blkSetFrame = (id)^(id _self, MyRect r, BOOL flag) {
-                ((void(*)(id, SEL, MyRect, BOOL))origSetFrame)(_self, sSetFrame, r, flag);
-                long mask = ((long(*)(id, SEL))objc_msgSend)(_self, fn_sel("styleMask"));
-                if (mask & (1 << 14)) {
-                    ((void(*)(id, SEL, long))objc_msgSend)(_self, fn_sel("setLevel:"), 100);
-                    ((void(*)(id, SEL, SEL, id, BOOL))objc_msgSend)(
-                        _self,
-                        fn_sel("performSelectorOnMainThread:withObject:waitUntilDone:"),
-                        fn_sel("orderFrontRegardless"),
-                        nil,
-                        NO
-                    );
-                    hideOverlayWindows();
-                }
-            };
-            void *newImp = fn_blockImp(blkSetFrame);
-            fn_setImp(mSetFrame, newImp);
-        }
-
-        // 10. Elevate any currently active fullscreen windows and hide overlay seams right now
+        // 8. Elevate any currently active fullscreen windows and hide overlay seams right now
         id app = ((id(*)(id, SEL))objc_msgSend)((id)fn_getClass("NSApplication"), fn_sel("sharedApplication"));
         if (app) {
             id windows = ((id(*)(id, SEL))objc_msgSend)(app, fn_sel("windows"));
@@ -305,14 +285,24 @@ def inject_pid(pid):
                     if (w) {
                         long mask = ((long(*)(id, SEL))objc_msgSend)(w, fn_sel("styleMask"));
                         if (mask & (1 << 14)) {
-                            ((void(*)(id, SEL, long))objc_msgSend)(w, sLevel, 100);
+                            ((void(*)(id, SEL, long))objc_msgSend)(w, sSetLevel, 100);
                             ((void(*)(id, SEL))objc_msgSend)(w, fn_sel("orderFrontRegardless"));
+                        }
+                        id cNameObj = ((id(*)(id, SEL))objc_msgSend)(w, fn_sel("className"));
+                        const char *cNameStr = cNameObj ? (const char*)((id(*)(id, SEL))objc_msgSend)(cNameObj, fn_sel("UTF8String")) : 0;
+                        if (cNameStr && (fn_strstr(cNameStr, "NSToolbarFullScreenWindow") || fn_strstr(cNameStr, "NativeWidgetMacOverlayNSWindow"))) {
+                            ((void(*)(id, SEL, SEL, id, BOOL))objc_msgSend)(
+                                w,
+                                fn_sel("performSelectorOnMainThread:withObject:waitUntilDone:"),
+                                fn_sel("orderOut:"),
+                                nil,
+                                NO
+                            );
                         }
                     }
                 }
             }
         }
-        hideOverlayWindows();
 
         (void*)1;
     })
