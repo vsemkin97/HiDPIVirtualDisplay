@@ -351,12 +351,21 @@ func isG9HelperRunning() bool {
 }
 
 func runDaemon() {
-	if !isG9HelperRunning() {
+	parentPID := os.Getppid()
+	isChildOfG9 := false
+	if parentPID > 1 {
+		out, err := exec.Command("ps", "-p", strconv.Itoa(parentPID), "-o", "comm=").Output()
+		if err == nil && strings.Contains(string(out), "HiDPIDisplay") {
+			isChildOfG9 = true
+		}
+	}
+
+	if !isChildOfG9 && !isG9HelperRunning() {
 		fmt.Println("[!] G9 Helper (HiDPIDisplay) is not running. Exiting.")
 		return
 	}
 
-	fmt.Println("[*] G9 Helper Seamless Fullscreen native daemon started. Monitoring browsers...")
+	fmt.Printf("[*] G9 Helper Seamless Fullscreen native daemon started (parent PID %d, child=%v). Monitoring browsers...\n", parentPID, isChildOfG9)
 
 	injectedPIDs := make(map[int]bool)
 	failedCounts := make(map[int]int)
@@ -375,9 +384,16 @@ func runDaemon() {
 			return
 		case <-ticker.C:
 			// Automatically exit if G9 Helper was closed or quit
-			if !isG9HelperRunning() {
-				fmt.Println("[*] G9 Helper stopped. Seamless Fullscreen daemon exiting.")
-				return
+			if isChildOfG9 {
+				if os.Getppid() != parentPID || syscall.Kill(parentPID, 0) != nil {
+					fmt.Println("[*] Parent G9 Helper stopped. Daemon exiting.")
+					return
+				}
+			} else {
+				if !isG9HelperRunning() {
+					fmt.Println("[*] G9 Helper stopped. Daemon exiting.")
+					return
+				}
 			}
 
 			targets := findTargetPIDs()

@@ -119,8 +119,7 @@ if security find-identity -v -p codesigning | grep -q "${SIGN_IDENTITY}"; then
         --entitlements HiDPIVirtualDisplay.entitlements "${APP_BUNDLE}"
 else
     echo "Developer ID identity not found — using ad-hoc signature (local build)"
-    codesign --force --sign - \
-        --entitlements HiDPIVirtualDisplay.entitlements "${APP_BUNDLE}"
+    codesign --force --deep --sign - "${APP_BUNDLE}"
 fi
 codesign --verify --strict --verbose=2 "${APP_BUNDLE}"
 
