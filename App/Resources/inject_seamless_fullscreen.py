@@ -15,8 +15,6 @@ if "CommandLineTools" not in sys.executable and not os.environ.get("_INJECTOR_RE
     os.environ["_INJECTOR_REEXEC"] = "1"
     os.execv("/usr/bin/python3", ["/usr/bin/python3"] + sys.argv)
 
-
-
 # Ensure LLDB python module is in sys.path
 lldb_paths = [
     "/Library/Developer/CommandLineTools/Library/PrivateFrameworks/LLDB.framework/Resources/Python",
@@ -66,7 +64,7 @@ def find_target_pids():
                     except ValueError:
                         pass
                     break
-    except Exception as e:
+    except Exception:
         pass
     return pids
 
@@ -108,11 +106,13 @@ def inject_pid(pid):
             }
         };
 
-        // 1. Companion controller: eliminate 1-px baseline separator & backstop curtain
+        // 1. Companion controller: eliminate 1-px baseline separator & blackout curtain
         hook("_NSFullScreenMenuBarCompanionController", "_shouldDrawBaselineForEffectiveReveal:",
              (id)^(id _self, double r) { return (BOOL)0; });
         hook("_NSFullScreenMenuBarCompanionController", "needsOpaqueBackstop",
              (id)^(id _self) { return (BOOL)0; });
+        hook("_NSFullScreenMenuBarCompanionController", "setNeedsOpaqueBackstop:",
+             (id)^(id _self, BOOL flag) { /* no-op: never show blackout curtain */ });
 
         // 2. Titlebar hairline separator elimination
         hook("NSThemeFrame", "_needsTitlebarSeparator",
@@ -186,7 +186,7 @@ def inject_pid(pid):
                  return (long)0;
              });
 
-        // 6. Hook setLevel: to automatically elevate fullscreen windows to layer 100
+        // 6. Hook setLevel: to automatically keep fullscreen windows elevated to layer 100
         void *clsWindow = fn_getClass("NSWindow");
         SEL sLevel = fn_sel("setLevel:");
         void *mLevel = fn_getMethod(clsWindow, sLevel);
@@ -204,7 +204,64 @@ def inject_pid(pid):
             fn_setImp(mLevel, newImp);
         }
 
-        // 7. Elevate any currently active fullscreen windows right now
+        // 7. Swizzle _didEnterFullScreen to immediately elevate and order front when entering fullscreen
+        SEL sDidEnter = fn_sel("_didEnterFullScreen");
+        void *mDidEnter = fn_getMethod(clsWindow, sDidEnter);
+        if (mDidEnter) {
+            void *origDidEnter = fn_getImp(mDidEnter);
+            id blkDidEnter = (id)^(id _self) {
+                ((void(*)(id, SEL))origDidEnter)(_self, sDidEnter);
+                ((void(*)(id, SEL, long))objc_msgSend)(_self, fn_sel("setLevel:"), 100);
+                ((void(*)(id, SEL, SEL, id, BOOL))objc_msgSend)(
+                    _self,
+                    fn_sel("performSelectorOnMainThread:withObject:waitUntilDone:"),
+                    fn_sel("orderFrontRegardless"),
+                    nil,
+                    NO
+                );
+            };
+            void *newImp = fn_blockImp(blkDidEnter);
+            fn_setImp(mDidEnter, newImp);
+        }
+
+        // 8. Swizzle _didExitFullScreen to restore normal window level (0)
+        SEL sDidExit = fn_sel("_didExitFullScreen");
+        void *mDidExit = fn_getMethod(clsWindow, sDidExit);
+        if (mDidExit) {
+            void *origDidExit = fn_getImp(mDidExit);
+            id blkDidExit = (id)^(id _self) {
+                ((void(*)(id, SEL))origDidExit)(_self, sDidExit);
+                ((void(*)(id, SEL, long))objc_msgSend)(_self, fn_sel("setLevel:"), 0);
+            };
+            void *newImp = fn_blockImp(blkDidExit);
+            fn_setImp(mDidExit, newImp);
+        }
+
+        // 9. Swizzle setFrame:display: so resizes while in fullscreen maintain layer 100
+        SEL sSetFrame = fn_sel("setFrame:display:");
+        void *mSetFrame = fn_getMethod(clsWindow, sSetFrame);
+        if (mSetFrame) {
+            void *origSetFrame = fn_getImp(mSetFrame);
+            id blkSetFrame = (id)^(id _self, MyRect r, BOOL flag) {
+                ((void(*)(id, SEL, MyRect, BOOL))origSetFrame)(_self, sSetFrame, r, flag);
+                long mask = ((long(*)(id, SEL))objc_msgSend)(_self, fn_sel("styleMask"));
+                if (mask & (1 << 14)) {
+                    ((void(*)(id, SEL, long))objc_msgSend)(_self, fn_sel("setLevel:"), 100);
+                    ((void(*)(id, SEL, SEL, id, BOOL))objc_msgSend)(
+                        _self,
+                        fn_sel("performSelectorOnMainThread:withObject:waitUntilDone:"),
+                        fn_sel("orderFrontRegardless"),
+                        nil,
+                        NO
+                    );
+                }
+            };
+            void *newImp = fn_blockImp(blkSetFrame);
+            fn_setImp(mSetFrame, newImp);
+        }
+
+
+        // 10. Elevate any currently active fullscreen windows right now
         id app = ((id(*)(id, SEL))objc_msgSend)((id)fn_getClass("NSApplication"), fn_sel("sharedApplication"));
         if (app) {
             id windows = ((id(*)(id, SEL))objc_msgSend)(app, fn_sel("windows"));
