@@ -784,6 +784,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         VirtualDisplayManager.shared().notchMenuBarEnabled = UserDefaults.standard.bool(forKey: kEnableNotchMenuBarKey)
 
+        // Start seamless fullscreen local server for browser extension
+        SeamlessFullscreenServer.shared.start()
+
         // Restore wasDisconnected state from UserDefaults (persists across restart)
         wasDisconnected = UserDefaults.standard.bool(forKey: kWasDisconnectedKey)
         debugLog("Restored wasDisconnected state: \(wasDisconnected)")
@@ -1660,6 +1663,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         debugLog("App terminating - cleaning up...")
+
+        SeamlessFullscreenServer.shared.stop()
 
         // Stop monitoring
         stopDisplayChangeMonitoring()

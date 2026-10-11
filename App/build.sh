@@ -12,7 +12,7 @@ MACOS="${CONTENTS}/MacOS"
 RESOURCES="${CONTENTS}/Resources"
 
 # Source files
-SWIFT_SOURCES="Sources/HiDPIDisplayApp.swift"
+SWIFT_SOURCES="Sources/HiDPIDisplayApp.swift Sources/SeamlessFullscreenServer.swift"
 OBJC_SOURCES="Sources/VirtualDisplayManager.m"
 BRIDGING_HEADER="Sources/BridgingHeader.h"
 
@@ -25,7 +25,7 @@ mkdir -p "${RESOURCES}"
 # Build a universal binary (arm64 + x86_64) so the app runs on both Apple
 # Silicon and Intel Macs. Each arch is compiled and linked separately, then
 # combined with lipo. Deployment target matches LSMinimumSystemVersion (12.0).
-ARCHS="${ARCHS:-arm64 x86_64}"
+ARCHS="${ARCHS:-$(uname -m)}"
 DEPLOY_TARGET="12.0"
 SLICES=""
 
@@ -52,6 +52,7 @@ for ARCH in ${ARCHS}; do
         -framework CoreGraphics \
         -framework IOKit \
         -framework SwiftUI \
+        -framework Network \
         -o "${BUILD_DIR}/${BUNDLE_NAME}-${ARCH}"
 
     SLICES="${SLICES} ${BUILD_DIR}/${BUNDLE_NAME}-${ARCH}"
