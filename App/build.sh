@@ -12,7 +12,7 @@ MACOS="${CONTENTS}/MacOS"
 RESOURCES="${CONTENTS}/Resources"
 
 # Source files
-SWIFT_SOURCES="Sources/HiDPIDisplayApp.swift Sources/SeamlessFullscreenServer.swift"
+SWIFT_SOURCES="Sources/HiDPIDisplayApp.swift Sources/SeamlessFullscreenManager.swift"
 OBJC_SOURCES="Sources/VirtualDisplayManager.m"
 BRIDGING_HEADER="Sources/BridgingHeader.h"
 
@@ -71,6 +71,19 @@ if [ -f "Resources/AppIcon.icns" ]; then
     cp Resources/AppIcon.icns "${RESOURCES}/"
     echo "App icon copied"
 fi
+
+# Build universal NoNotchLetterbox dylib and insert_dylib tool
+echo "Building NoNotchLetterbox universal dylib..."
+clang -dynamiclib -fobjc-arc -framework Cocoa \
+    -arch arm64 -arch arm64e -arch x86_64 \
+    Sources/NoNotchLetterbox.m \
+    -o "${RESOURCES}/NoNotchLetterbox.dylib"
+
+echo "Building insert_dylib tool..."
+clang -arch arm64 -arch x86_64 \
+    Sources/insert_dylib.c \
+    -o "${RESOURCES}/insert_dylib"
+
 
 # Sign the app with entitlements. Signing failures must fail the build —
 # an unsigned/mis-signed artifact used to slip through via `|| true`.

@@ -784,8 +784,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         VirtualDisplayManager.shared().notchMenuBarEnabled = UserDefaults.standard.bool(forKey: kEnableNotchMenuBarKey)
 
-        // Start seamless fullscreen local server for browser extension
-        SeamlessFullscreenServer.shared.start()
+        // Start seamless fullscreen manager for browsers and media players
+        SeamlessFullscreenManager.shared.start()
 
         // Restore wasDisconnected state from UserDefaults (persists across restart)
         wasDisconnected = UserDefaults.standard.bool(forKey: kWasDisconnectedKey)
@@ -1664,7 +1664,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         debugLog("App terminating - cleaning up...")
 
-        SeamlessFullscreenServer.shared.stop()
+        SeamlessFullscreenManager.shared.stop()
 
         // Stop monitoring
         stopDisplayChangeMonitoring()
@@ -1836,6 +1836,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         notchMenuItem.state = UserDefaults.standard.bool(forKey: kEnableNotchMenuBarKey) ? .on : .off
         settingsMenu.addItem(notchMenuItem)
 
+        let seamlessFullscreenItem = NSMenuItem(title: "Seamless Fullscreen (No Notch Letterbox)", action: #selector(toggleSeamlessFullscreen(_:)), keyEquivalent: "")
+        seamlessFullscreenItem.target = self
+        seamlessFullscreenItem.state = SeamlessFullscreenManager.shared.isEnabled ? .on : .off
+        settingsMenu.addItem(seamlessFullscreenItem)
+
         let autoUpdateItem = NSMenuItem(title: "Check for Updates Automatically", action: #selector(toggleAutoUpdate(_:)), keyEquivalent: "")
         autoUpdateItem.target = self
         autoUpdateItem.state = UpdateChecker.shared.autoCheckEnabled ? .on : .off
@@ -1976,6 +1981,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         rebuildMenu()
+    }
+
+    @objc func toggleSeamlessFullscreen(_ sender: NSMenuItem) {
+        let newState = !SeamlessFullscreenManager.shared.isEnabled
+        SeamlessFullscreenManager.shared.setEnabled(newState)
+        sender.state = newState ? .on : .off
+        debugLog("seamless fullscreen set to: \(newState)")
     }
 
     /// Apply the "Keep HDR On (Beta)" preference to the current physical mirror
