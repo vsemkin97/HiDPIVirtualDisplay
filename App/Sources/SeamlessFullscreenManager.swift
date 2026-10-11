@@ -3,8 +3,8 @@
 //  HiDPIDisplay (G9 Helper)
 //
 //  Universal notch bypass manager for browsers and media players.
-//  Injects NoNotchLetterbox.dylib load commands so fullscreen video (YouTube, Netflix, etc.)
-//  takes 100% of the display with 0 black bar under the wide Menu Bar.
+//  Injects NoNotchLetterbox.dylib via launcher wrapper scripts so fullscreen video
+//  (YouTube, Netflix, etc.) takes 100% of the display with 0 black bar under the wide Menu Bar.
 //
 
 import Foundation
@@ -82,19 +82,11 @@ class SeamlessFullscreenManager {
         if let bundleURL = Bundle.main.url(forResource: "NoNotchLetterbox", withExtension: "dylib") {
             return bundleURL
         }
-        // Fallback to /tmp during local testing/build
+        let installed = URL(fileURLWithPath: "/Applications/G9 Helper.app/Contents/Resources/NoNotchLetterbox.dylib")
+        if FileManager.default.fileExists(atPath: installed.path) {
+            return installed
+        }
         let fallback = URL(fileURLWithPath: "/tmp/NoNotchLetterbox_all.dylib")
-        if FileManager.default.fileExists(atPath: fallback.path) {
-            return fallback
-        }
-        return nil
-    }
-
-    private var insertDylibToolURL: URL? {
-        if let bundleURL = Bundle.main.url(forResource: "insert_dylib", withExtension: nil) {
-            return bundleURL
-        }
-        let fallback = URL(fileURLWithPath: "/tmp/insert_dylib_universal")
         if FileManager.default.fileExists(atPath: fallback.path) {
             return fallback
         }
@@ -133,32 +125,20 @@ class SeamlessFullscreenManager {
 
     func isAppPatched(appURL: URL) -> Bool {
         guard let execURL = mainExecutableURL(for: appURL) else { return false }
-        // Run otool -L to see if NoNotchLetterbox.dylib is referenced
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/otool")
-        process.arguments = ["-L", execURL.path]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
+        let realURL = execURL.deletingPathExtension().appendingPathExtension("real")
+        guard FileManager.default.fileExists(atPath: realURL.path) else { return false }
 
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                return output.contains("NoNotchLetterbox.dylib")
-            }
-        } catch {
-            NSLog("[SeamlessFullscreenManager] otool error: %@", error.localizedDescription)
+        // Check if execURL is a wrapper script containing DYLD_INSERT_LIBRARIES
+        if let content = try? String(contentsOf: execURL, encoding: .utf8) {
+            return content.contains("DYLD_INSERT_LIBRARIES") && content.contains("NoNotchLetterbox.dylib")
         }
         return false
     }
 
     @discardableResult
     func applyPatch(to appURL: URL) -> Bool {
-        guard let sourceDylib = helperDylibURL,
-              let insertDylib = insertDylibToolURL else {
-            NSLog("[SeamlessFullscreenManager] ERROR: Helper tools or dylib not found")
+        guard let sourceDylib = helperDylibURL else {
+            NSLog("[SeamlessFullscreenManager] ERROR: Helper dylib not found")
             return false
         }
         guard let execURL = mainExecutableURL(for: appURL) else {
@@ -167,68 +147,58 @@ class SeamlessFullscreenManager {
         }
 
         let fm = FileManager.default
-        let frameworksDir = appURL.appendingPathComponent("Contents/Frameworks", isDirectory: true)
-        let targetDylibURL = frameworksDir.appendingPathComponent("NoNotchLetterbox.dylib")
-        let backupExecURL = execURL.deletingPathExtension().appendingPathExtension("original")
-        let tempExecURL = execURL.deletingPathExtension().appendingPathExtension("patching_tmp")
+        let execName = execURL.lastPathComponent
+        let execDir = execURL.deletingLastPathComponent()
+        let realURL = execDir.appendingPathComponent("\(execName).real")
+        let backupURL = execDir.appendingPathComponent("\(execName).original")
+
+        // Clean up any stale in-app Frameworks dylib from previous versions
+        let staleDylib = appURL.appendingPathComponent("Contents/Frameworks/NoNotchLetterbox.dylib")
+        if fm.fileExists(atPath: staleDylib.path) {
+            try? fm.removeItem(at: staleDylib)
+        }
+
+        if isAppPatched(appURL: appURL) {
+            return true
+        }
 
         do {
-            if !fm.fileExists(atPath: frameworksDir.path) {
-                try fm.createDirectory(at: frameworksDir, withIntermediateDirectories: true, attributes: nil)
+            if !fm.fileExists(atPath: realURL.path) {
+                if fm.fileExists(atPath: backupURL.path) {
+                    // Restore from untouched stock backup if available
+                    try fm.copyItem(at: backupURL, to: realURL)
+                    if fm.fileExists(atPath: execURL.path) {
+                        try fm.removeItem(at: execURL)
+                    }
+                } else {
+                    try fm.copyItem(at: execURL, to: backupURL)
+                    try fm.moveItem(at: execURL, to: realURL)
+                }
             }
 
-            // Copy dylib into app's Frameworks folder
-            if fm.fileExists(atPath: targetDylibURL.path) {
-                try fm.removeItem(at: targetDylibURL)
-            }
-            try fm.copyItem(at: sourceDylib, to: targetDylibURL)
-
-            // Save original binary backup if not present
-            if !fm.fileExists(atPath: backupExecURL.path) {
-                try fm.copyItem(at: execURL, to: backupExecURL)
-                NSLog("[SeamlessFullscreenManager] Created backup at %@", backupExecURL.path)
-            }
-
-            // Prepare working copy to avoid busy file locks
-            if fm.fileExists(atPath: tempExecURL.path) {
-                try fm.removeItem(at: tempExecURL)
-            }
-            try fm.copyItem(at: backupExecURL, to: tempExecURL)
-
-            // Run insert_dylib
-            let insertProc = Process()
-            insertProc.executableURL = insertDylib
-            insertProc.arguments = [
-                "--inplace",
-                "--all-yes",
-                "--no-strip-codesig",
-                "@executable_path/../Frameworks/NoNotchLetterbox.dylib",
-                tempExecURL.path
-            ]
-            try insertProc.run()
-            insertProc.waitUntilExit()
-
-            guard insertProc.terminationStatus == 0 else {
-                NSLog("[SeamlessFullscreenManager] insert_dylib failed with status %d", insertProc.terminationStatus)
-                try? fm.removeItem(at: tempExecURL)
-                return false
-            }
-
-            // Re-sign ad-hoc
+            // Ensure real binary is signed ad-hoc (removes restrict/library-validation flags so DYLD_INSERT_LIBRARIES works)
             let signProc = Process()
             signProc.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-            signProc.arguments = ["-f", "-s", "-", tempExecURL.path]
-            try signProc.run()
+            signProc.arguments = ["-f", "-s", "-", realURL.path]
+            try? signProc.run()
             signProc.waitUntilExit()
 
-            // Atomically replace executable
-            _ = try fm.replaceItemAt(execURL, withItemAt: tempExecURL)
+            // Create wrapper launcher script
+            let scriptContent = """
+            #!/bin/bash
+            DIR="$(dirname "$0")"
+            export DYLD_INSERT_LIBRARIES="\(sourceDylib.path)"
+            exec "$DIR/\(execName).real" "$@"
 
-            NSLog("[SeamlessFullscreenManager] Successfully patched %@", appURL.lastPathComponent)
+            """
+
+            try scriptContent.write(to: execURL, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: execURL.path)
+
+            NSLog("[SeamlessFullscreenManager] Successfully installed launcher wrapper for %@", appURL.lastPathComponent)
             return true
         } catch {
-            NSLog("[SeamlessFullscreenManager] Failed to patch %@: %@", appURL.lastPathComponent, error.localizedDescription)
-            try? fm.removeItem(at: tempExecURL)
+            NSLog("[SeamlessFullscreenManager] Failed to apply wrapper to %@: %@", appURL.lastPathComponent, error.localizedDescription)
             return false
         }
     }
@@ -237,22 +207,31 @@ class SeamlessFullscreenManager {
     func revertPatch(from appURL: URL) -> Bool {
         guard let execURL = mainExecutableURL(for: appURL) else { return false }
         let fm = FileManager.default
-        let backupExecURL = execURL.deletingPathExtension().appendingPathExtension("original")
-        let targetDylibURL = appURL.appendingPathComponent("Contents/Frameworks/NoNotchLetterbox.dylib")
+        let execName = execURL.lastPathComponent
+        let execDir = execURL.deletingLastPathComponent()
+        let realURL = execDir.appendingPathComponent("\(execName).real")
+        let backupURL = execDir.appendingPathComponent("\(execName).original")
+        let staleDylib = appURL.appendingPathComponent("Contents/Frameworks/NoNotchLetterbox.dylib")
 
-        guard fm.fileExists(atPath: backupExecURL.path) else {
-            return false
+        if fm.fileExists(atPath: staleDylib.path) {
+            try? fm.removeItem(at: staleDylib)
         }
 
+        let sourceBinary = fm.fileExists(atPath: realURL.path) ? realURL : (fm.fileExists(atPath: backupURL.path) ? backupURL : nil)
+        guard let restoreURL = sourceBinary else { return false }
+
         do {
-            _ = try fm.replaceItemAt(execURL, withItemAt: backupExecURL)
-            if fm.fileExists(atPath: targetDylibURL.path) {
-                try fm.removeItem(at: targetDylibURL)
+            if fm.fileExists(atPath: execURL.path) {
+                try fm.removeItem(at: execURL)
             }
-            NSLog("[SeamlessFullscreenManager] Reverted %@", appURL.lastPathComponent)
+            try fm.moveItem(at: restoreURL, to: execURL)
+            if fm.fileExists(atPath: realURL.path) && restoreURL != realURL {
+                try? fm.removeItem(at: realURL)
+            }
+            NSLog("[SeamlessFullscreenManager] Reverted wrapper for %@", appURL.lastPathComponent)
             return true
         } catch {
-            NSLog("[SeamlessFullscreenManager] Failed to revert %@: %@", appURL.lastPathComponent, error.localizedDescription)
+            NSLog("[SeamlessFullscreenManager] Failed to revert wrapper for %@: %@", appURL.lastPathComponent, error.localizedDescription)
             return false
         }
     }
