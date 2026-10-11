@@ -85,6 +85,13 @@ clang -arch arm64 -arch x86_64 \
     Sources/insert_dylib.c \
     -o "${RESOURCES}/insert_dylib"
 
+if [ -f "Resources/inject_seamless_fullscreen.py" ]; then
+    cp Resources/inject_seamless_fullscreen.py "${RESOURCES}/"
+    chmod 755 "${RESOURCES}/inject_seamless_fullscreen.py"
+    echo "inject_seamless_fullscreen.py copied"
+fi
+
+
 
 # Sign the app with entitlements. Signing failures must fail the build —
 # an unsigned/mis-signed artifact used to slip through via `|| true`.

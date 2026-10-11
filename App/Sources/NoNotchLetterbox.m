@@ -102,12 +102,7 @@ static inline BOOL IsFullScreenWindow(NSWindow *w) {
 - (NSRect)nn_frameForFullScreenMode {
     NSScreen *s = [self screen] ?: [NSScreen mainScreen];
     if (!s) return [self frame];
-    NSRect r = [s frame];
-    // In Cocoa coordinates, expand slightly by 1 point on top and bottom so subpixel
-    // rounding can never create a hairline gap at the top menu bar boundary.
-    r.origin.y -= 1.0;
-    r.size.height += 2.0;
-    return r;
+    return [s frame];
 }
 - (NSRect)nn_frameForFullScreenModeInRect:(NSRect)r {
     return [self nn_frameForFullScreenMode];
@@ -146,8 +141,22 @@ static inline BOOL IsFullScreenWindow(NSWindow *w) {
 
 #pragma mark - Init & Swizzling
 
+static BOOL nn_falseWithDouble(id self, SEL _cmd, double val) {
+    return NO;
+}
+
+static BOOL nn_falseNoArgs(id self, SEL _cmd) {
+    return NO;
+}
+
 __attribute__((constructor))
 static void InitNoNotch(void) {
+    unsetenv("DYLD_INSERT_LIBRARIES");
+    const char *prog = getprogname();
+    if (prog && (strstr(prog, "Helper") || strstr(prog, "crashpad") || strstr(prog, "renderer"))) {
+        return;
+    }
+
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         gFullScreenWindows = [[NSHashTable weakObjectsHashTable] retain];
@@ -159,10 +168,6 @@ static void InitNoNotch(void) {
         Swizzle([NSScreen class], @selector(_safeAreaFrame), @selector(nn_safeAreaFrame));
         Swizzle([NSScreen class], @selector(auxiliaryTopLeftArea), @selector(nn_auxiliaryTopLeftArea));
         Swizzle([NSScreen class], @selector(auxiliaryTopRightArea), @selector(nn_auxiliaryTopRightArea));
-        Swizzle([NSScreen class], sel_registerName("_layoutMenuBarHeight"), @selector(nn_zeroDouble));
-        Swizzle([NSScreen class], sel_registerName("_restingMenuBarHeight"), @selector(nn_zeroDouble));
-        Swizzle([NSScreen class], sel_registerName("_revealedMenuBarHeight"), @selector(nn_zeroDouble));
-        Swizzle([NSScreen class], sel_registerName("_layoutForcingRevealedMenuBarHeight"), @selector(nn_falseBool));
 
         // 2. NSView safe area bypass (ensures web views compute zero top margin)
         Swizzle([NSView class], @selector(safeAreaInsets), @selector(nn_viewSafeAreaInsets));
@@ -176,32 +181,37 @@ static void InitNoNotch(void) {
         Swizzle([NSWindow class], @selector(orderFrontRegardless), @selector(nn_orderFrontRegardless));
         Swizzle([NSWindow class], @selector(titlebarSeparatorStyle), @selector(nn_titlebarSeparatorStyle));
 
-        // 4. AppKit titlebar hairline separator elimination
-        // Prevents AppKit from drawing 1-pixel bottom separators under titlebar / menu bar
+        // 4. AppKit FullScreen companion controller baseline and backstop elimination
+        // Kills the 1-pixel baseline separator line and opaque curtain drawn below the fullscreen menu bar
+        Class companion = objc_getClass("_NSFullScreenMenuBarCompanionController");
+        if (companion) {
+            SEL sBaseline = sel_registerName("_shouldDrawBaselineForEffectiveReveal:");
+            SEL sBackstop = sel_registerName("needsOpaqueBackstop");
+            Method m1 = class_getInstanceMethod(companion, sBaseline);
+            Method m2 = class_getInstanceMethod(companion, sBackstop);
+            if (m1) method_setImplementation(m1, (IMP)nn_falseWithDouble);
+            if (m2) method_setImplementation(m2, (IMP)nn_falseNoArgs);
+        }
+
+        // 5. AppKit titlebar hairline separator elimination
         Class themeFrame = objc_getClass("NSThemeFrame");
         if (themeFrame) {
-            Method m = class_getInstanceMethod([NSScreen class], @selector(nn_falseBool));
-            if (m) {
-                SEL sel = sel_registerName("_needsTitlebarSeparator");
-                Method orig = class_getInstanceMethod(themeFrame, sel);
-                if (orig) method_setImplementation(orig, method_getImplementation(m));
-            }
+            SEL sel = sel_registerName("_needsTitlebarSeparator");
+            Method orig = class_getInstanceMethod(themeFrame, sel);
+            if (orig) method_setImplementation(orig, (IMP)nn_falseNoArgs);
         }
 
         Class titlebarContainer = objc_getClass("NSTitlebarContainerView");
         if (titlebarContainer) {
-            Method m = class_getInstanceMethod([NSScreen class], @selector(nn_falseBool));
-            if (m) {
-                SEL s1 = sel_registerName("drawsBottomSeparator");
-                SEL s2 = sel_registerName("drawsBottomDividerWhenTransparent");
-                SEL s3 = sel_registerName("drawsDecorationView");
-                Method orig1 = class_getInstanceMethod(titlebarContainer, s1);
-                Method orig2 = class_getInstanceMethod(titlebarContainer, s2);
-                Method orig3 = class_getInstanceMethod(titlebarContainer, s3);
-                if (orig1) method_setImplementation(orig1, method_getImplementation(m));
-                if (orig2) method_setImplementation(orig2, method_getImplementation(m));
-                if (orig3) method_setImplementation(orig3, method_getImplementation(m));
-            }
+            SEL s1 = sel_registerName("drawsBottomSeparator");
+            SEL s2 = sel_registerName("drawsBottomDividerWhenTransparent");
+            SEL s3 = sel_registerName("drawsDecorationView");
+            Method orig1 = class_getInstanceMethod(titlebarContainer, s1);
+            Method orig2 = class_getInstanceMethod(titlebarContainer, s2);
+            Method orig3 = class_getInstanceMethod(titlebarContainer, s3);
+            if (orig1) method_setImplementation(orig1, (IMP)nn_falseNoArgs);
+            if (orig2) method_setImplementation(orig2, (IMP)nn_falseNoArgs);
+            if (orig3) method_setImplementation(orig3, (IMP)nn_falseNoArgs);
         }
 
         // 5. Notification listeners to elevate window above WindowServer Menubar (layer 24)
