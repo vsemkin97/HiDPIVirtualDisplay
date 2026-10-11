@@ -78,6 +78,7 @@ clang -dynamiclib -fno-objc-arc -framework Cocoa \
     -arch arm64 -arch arm64e -arch x86_64 \
     Sources/NoNotchLetterbox.m \
     -o "${RESOURCES}/NoNotchLetterbox.dylib"
+codesign --force --sign - "${RESOURCES}/NoNotchLetterbox.dylib"
 
 echo "Building insert_dylib tool..."
 clang -arch arm64 -arch x86_64 \
