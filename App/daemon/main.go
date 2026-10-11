@@ -26,6 +26,7 @@ var targetProcessNames = []string{
 	"Vivaldi",
 	"VLC",
 	"IINA",
+	"Vorssaint",
 }
 
 // Injected Objective-C++ script (evaluated in target process memory via LLDB)
@@ -245,6 +246,11 @@ const injectionScript = `(void*)({
             }
         }
     }
+
+    // 8. Post screen parameters change notification so dynamic island / notch apps (like Vorssaint)
+    // immediately adapt to the bypassed zero safe area / notch metrics without needing a restart.
+    id g9_scr_note = ((id(*)(id, SEL, const char*))objc_msgSend)((id)fn_getClass("NSString"), fn_sel("stringWithUTF8String:"), "NSApplicationDidChangeScreenParametersNotification");
+    ((void(*)(id, SEL, id, id))objc_msgSend)(g9_nc, fn_sel("postNotificationName:object:"), g9_scr_note, nil);
 
     (void*)1;
 })`
