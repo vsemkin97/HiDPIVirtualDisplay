@@ -3,6 +3,7 @@ build/
 *.app
 *.dSYM/
 *.o
+App/Resources/g9-seamless-daemon
 
 # DMGs in build folders (but not releases/)
 App/build/*.dmg

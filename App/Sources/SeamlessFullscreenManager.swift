@@ -49,6 +49,8 @@ class SeamlessFullscreenManager {
         "IINA"
     ]
 
+    private var daemonProcess: Process?
+
     var isEnabled: Bool {
         get {
             // Default to true if Notch Menu Bar is enabled
@@ -60,7 +62,10 @@ class SeamlessFullscreenManager {
         set {
             UserDefaults.standard.set(newValue, forKey: kEnabledKey)
             if newValue {
+                startDaemon()
                 applyToAllDetectedApps()
+            } else {
+                stopDaemon()
             }
         }
     }
@@ -79,6 +84,7 @@ class SeamlessFullscreenManager {
         cleanupLegacyWrappers()
 
         if isEnabled {
+            startDaemon()
             applyToAllDetectedApps()
         }
 
@@ -106,23 +112,57 @@ class SeamlessFullscreenManager {
     func stop() {
         guard isRunning else { return }
         isRunning = false
+        stopDaemon()
         if let observer = launchObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
             launchObserver = nil
         }
     }
 
+    // MARK: - Daemon Lifecycle
+
+    func startDaemon() {
+        guard daemonProcess == nil || !daemonProcess!.isRunning else { return }
+        guard let exe = daemonExecutableURL else {
+            NSLog("[SeamlessFullscreenManager] WARN: g9-seamless-daemon executable not found")
+            return
+        }
+
+        let proc = Process()
+        proc.executableURL = exe
+        proc.arguments = ["--daemon"]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            daemonProcess = proc
+            NSLog("[SeamlessFullscreenManager] Native g9-seamless-daemon started (PID %d)", proc.processIdentifier)
+        } catch {
+            NSLog("[SeamlessFullscreenManager] Failed to launch g9-seamless-daemon: %@", error.localizedDescription)
+        }
+    }
+
+    func stopDaemon() {
+        if let proc = daemonProcess {
+            if proc.isRunning {
+                proc.terminate()
+                NSLog("[SeamlessFullscreenManager] Native g9-seamless-daemon stopped")
+            }
+            daemonProcess = nil
+        }
+    }
+
     // MARK: - Resource Paths
 
-    private var injectScriptURL: URL? {
-        if let bundleURL = Bundle.main.url(forResource: "inject_seamless_fullscreen", withExtension: "py") {
+    private var daemonExecutableURL: URL? {
+        if let bundleURL = Bundle.main.url(forResource: "g9-seamless-daemon", withExtension: nil) {
             return bundleURL
         }
-        let installed = URL(fileURLWithPath: "/Applications/G9 Helper.app/Contents/Resources/inject_seamless_fullscreen.py")
+        let installed = URL(fileURLWithPath: "/Applications/G9 Helper.app/Contents/Resources/g9-seamless-daemon")
         if FileManager.default.fileExists(atPath: installed.path) {
             return installed
         }
-        let devPath = URL(fileURLWithPath: "/Users/vladislav/РАБстол/HiDPIVirtualDisplay-add/clean_version/App/Resources/inject_seamless_fullscreen.py")
+        let devPath = URL(fileURLWithPath: "/Users/vladislav/РАБстол/HiDPIVirtualDisplay-add/clean_version/App/Resources/g9-seamless-daemon")
         if FileManager.default.fileExists(atPath: devPath.path) {
             return devPath
         }
@@ -132,19 +172,15 @@ class SeamlessFullscreenManager {
     // MARK: - In-Memory Injection
 
     func applyToPID(_ pid: pid_t) {
-        guard let script = injectScriptURL else {
-            NSLog("[SeamlessFullscreenManager] ERROR: inject_seamless_fullscreen.py not found")
+        guard let exe = daemonExecutableURL else {
+            NSLog("[SeamlessFullscreenManager] ERROR: g9-seamless-daemon not found for PID %d", pid)
             return
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
             let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-            proc.arguments = [script.path, String(pid)]
-            proc.environment = [
-                "PYTHONPATH": "/Library/Developer/CommandLineTools/Library/PrivateFrameworks/LLDB.framework/Resources/Python",
-                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"
-            ]
+            proc.executableURL = exe
+            proc.arguments = [String(pid)]
             do {
                 try proc.run()
                 proc.waitUntilExit()
@@ -160,23 +196,19 @@ class SeamlessFullscreenManager {
     }
 
     func applyToAllDetectedApps() {
-        guard let script = injectScriptURL else {
-            NSLog("[SeamlessFullscreenManager] ERROR: inject_seamless_fullscreen.py not found")
+        guard let exe = daemonExecutableURL else {
+            NSLog("[SeamlessFullscreenManager] ERROR: g9-seamless-daemon not found for scan")
             return
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
             let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-            proc.arguments = [script.path, "--all"]
-            proc.environment = [
-                "PYTHONPATH": "/Library/Developer/CommandLineTools/Library/PrivateFrameworks/LLDB.framework/Resources/Python",
-                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"
-            ]
+            proc.executableURL = exe
+            proc.arguments = ["--all"]
             do {
                 try proc.run()
                 proc.waitUntilExit()
-                NSLog("[SeamlessFullscreenManager] Completed scan and injection for running apps")
+                NSLog("[SeamlessFullscreenManager] Completed native scan and injection for running apps")
             } catch {
                 NSLog("[SeamlessFullscreenManager] Failed to run injector scan: %@", error.localizedDescription)
             }

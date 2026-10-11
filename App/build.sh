@@ -85,6 +85,16 @@ clang -arch arm64 -arch x86_64 \
     Sources/insert_dylib.c \
     -o "${RESOURCES}/insert_dylib"
 
+if [ -d "daemon" ]; then
+    echo "Building native g9-seamless-daemon universal binary (Go)..."
+    CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o "${BUILD_DIR}/g9-seamless-daemon-arm64" daemon/main.go
+    CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o "${BUILD_DIR}/g9-seamless-daemon-amd64" daemon/main.go
+    lipo -create "${BUILD_DIR}/g9-seamless-daemon-arm64" "${BUILD_DIR}/g9-seamless-daemon-amd64" -o "${RESOURCES}/g9-seamless-daemon"
+    chmod 755 "${RESOURCES}/g9-seamless-daemon"
+    codesign --force --sign - "${RESOURCES}/g9-seamless-daemon"
+    echo "g9-seamless-daemon built and packaged"
+fi
+
 if [ -f "Resources/inject_seamless_fullscreen.py" ]; then
     cp Resources/inject_seamless_fullscreen.py "${RESOURCES}/"
     chmod 755 "${RESOURCES}/inject_seamless_fullscreen.py"
