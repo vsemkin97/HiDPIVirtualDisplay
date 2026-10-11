@@ -2,54 +2,51 @@
 #import <objc/runtime.h>
 
 static void Swizzle(Class cls, SEL origSel, SEL newSel) {
-    if (!cls) return;
     Method orig = class_getInstanceMethod(cls, origSel);
-    Method newM = class_getInstanceMethod([NSObject class], newSel);
-    if (!orig || !newM) return;
-    IMP newIMP = method_getImplementation(newM);
-    const char *types = method_getTypeEncoding(orig);
-    class_addMethod(cls, newSel, newIMP, types);
-    Method added = class_getInstanceMethod(cls, newSel);
-    if (added) {
-        method_exchangeImplementations(orig, added);
+    Method newM = class_getInstanceMethod(cls, newSel);
+    if (orig && newM) {
+        method_exchangeImplementations(orig, newM);
     }
 }
 
-@interface NSObject (NoNotchHelpers)
-- (NSEdgeInsets)nn_zeroEdgeInsets;
-- (NSRect)nn_zeroRect;
-- (NSRect)nn_zeroRectForSpace:(uint64_t)space;
-- (double)nn_zeroDouble;
-- (BOOL)nn_falseBool;
-- (void)nn_noopWithBool:(BOOL)b;
-@end
-
-@implementation NSObject (NoNotchHelpers)
-- (NSEdgeInsets)nn_zeroEdgeInsets { return NSEdgeInsetsZero; }
-- (NSRect)nn_zeroRect { return NSZeroRect; }
-- (NSRect)nn_zeroRectForSpace:(uint64_t)space { return NSZeroRect; }
-- (double)nn_zeroDouble { return 0.0; }
-- (BOOL)nn_falseBool { return NO; }
-- (void)nn_noopWithBool:(BOOL)b { }
-@end
-
-@interface NSScreen (NoNotchCustom)
+@interface NSScreen (NoNotch)
+- (NSEdgeInsets)nn_safeAreaInsets;
+- (NSRect)nn_notchFrame;
+- (NSRect)nn_notchFrameForSpace:(uint64_t)space;
 - (NSRect)nn_safeAreaFrame;
+- (NSRect)nn_auxiliaryTopLeftArea;
+- (NSRect)nn_auxiliaryTopRightArea;
 @end
 
-@implementation NSScreen (NoNotchCustom)
+@implementation NSScreen (NoNotch)
+- (NSEdgeInsets)nn_safeAreaInsets {
+    return NSEdgeInsetsZero;
+}
+- (NSRect)nn_notchFrame {
+    return NSZeroRect;
+}
+- (NSRect)nn_notchFrameForSpace:(uint64_t)space {
+    return NSZeroRect;
+}
 - (NSRect)nn_safeAreaFrame {
     return [self frame];
 }
+- (NSRect)nn_auxiliaryTopLeftArea {
+    return NSZeroRect;
+}
+- (NSRect)nn_auxiliaryTopRightArea {
+    return NSZeroRect;
+}
 @end
 
-@interface NSWindow (NoNotchCustom)
+@interface NSWindow (NoNotch)
 - (NSRect)nn_frameForFullScreenMode;
 - (NSRect)nn_frameForFullScreenModeInRect:(NSRect)r;
 - (NSRect)nn_enforceFullScreenRestrictionForFrame:(NSRect)r;
+- (void)nn_setLevel:(NSInteger)level;
 @end
 
-@implementation NSWindow (NoNotchCustom)
+@implementation NSWindow (NoNotch)
 - (NSRect)nn_frameForFullScreenMode {
     NSScreen *s = [self screen];
     if (!s) s = [NSScreen mainScreen];
@@ -63,67 +60,67 @@ static void Swizzle(Class cls, SEL origSel, SEL newSel) {
 - (NSRect)nn_enforceFullScreenRestrictionForFrame:(NSRect)r {
     return r;
 }
+- (void)nn_setLevel:(NSInteger)level {
+    if (self.styleMask & NSWindowStyleMaskFullScreen) {
+        // WindowServer Menubar is at layer 24 (NSMainMenuWindowLevel).
+        // Elevate fullscreen window to layer 25 so video draws over the black bar.
+        [self nn_setLevel:NSMainMenuWindowLevel + 1];
+    } else {
+        [self nn_setLevel:level];
+    }
+}
 @end
 
 __attribute__((constructor))
 static void InitNoNotch(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        // 1. NSScreen notch & safe area overrides
-        Swizzle([NSScreen class], @selector(safeAreaInsets), @selector(nn_zeroEdgeInsets));
-        Swizzle([NSScreen class], @selector(_notchFrame), @selector(nn_zeroRect));
-        Swizzle([NSScreen class], @selector(_notchFrameForSpace:), @selector(nn_zeroRectForSpace:));
+        // 1. NSScreen notch & safe area bypass (scalar uint64_t space argument, no ARC)
+        Swizzle([NSScreen class], @selector(safeAreaInsets), @selector(nn_safeAreaInsets));
+        Swizzle([NSScreen class], @selector(_notchFrame), @selector(nn_notchFrame));
+        Swizzle([NSScreen class], @selector(_notchFrameForSpace:), @selector(nn_notchFrameForSpace:));
         Swizzle([NSScreen class], @selector(_safeAreaFrame), @selector(nn_safeAreaFrame));
-        Swizzle([NSScreen class], @selector(auxiliaryTopLeftArea), @selector(nn_zeroRect));
-        Swizzle([NSScreen class], @selector(auxiliaryTopRightArea), @selector(nn_zeroRect));
-        Swizzle([NSScreen class], sel_registerName("_revealedMenuBarHeight"), @selector(nn_zeroDouble));
-        Swizzle([NSScreen class], sel_registerName("_layoutForcingRevealedMenuBarHeight"), @selector(nn_falseBool));
+        Swizzle([NSScreen class], @selector(auxiliaryTopLeftArea), @selector(nn_auxiliaryTopLeftArea));
+        Swizzle([NSScreen class], @selector(auxiliaryTopRightArea), @selector(nn_auxiliaryTopRightArea));
 
-        // 2. NSCGSDisplay (AppKit low-level display cache)
-        Class cgsDisplay = objc_getClass("NSCGSDisplay");
-        if (cgsDisplay) {
-            Swizzle(cgsDisplay, sel_registerName("notchFrame"), @selector(nn_zeroRect));
-            Swizzle(cgsDisplay, sel_registerName("revealedMenuBarHeight"), @selector(nn_zeroDouble));
-        }
-
-        // 3. NSWindow full screen framing
+        // 2. NSWindow fullscreen frame & window level overrides
         Swizzle([NSWindow class], @selector(_frameForFullScreenMode), @selector(nn_frameForFullScreenMode));
         Swizzle([NSWindow class], @selector(_frameForFullScreenModeInRect:), @selector(nn_frameForFullScreenModeInRect:));
         Swizzle([NSWindow class], @selector(_enforceFullScreenRestrictionForFrame:), @selector(nn_enforceFullScreenRestrictionForFrame:));
+        Swizzle([NSWindow class], @selector(setLevel:), @selector(nn_setLevel:));
 
-        // 4. _NSFullScreenSpace (prevents space from keeping menu bar reserved)
-        Class fsSpace = objc_getClass("_NSFullScreenSpace");
-        if (fsSpace) {
-            Swizzle(fsSpace, sel_registerName("alwaysReservesSpaceForMenuBarInFullScreen"), @selector(nn_falseBool));
-        }
+        // 3. Notification listeners to elevate window above WindowServer Menubar (layer 24)
+        [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillEnterFullScreenNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification *note) {
+            if ([note.object isKindOfClass:[NSWindow class]]) {
+                NSWindow *w = (NSWindow *)note.object;
+                [w setLevel:NSMainMenuWindowLevel + 1];
+            }
+        }];
 
-        // 5. _NSFullScreenContentController
-        Class fsContent = objc_getClass("_NSFullScreenContentController");
-        if (fsContent) {
-            Swizzle(fsContent, sel_registerName("reservesSpaceForMenuBarInFullScreen"), @selector(nn_falseBool));
-            Swizzle(fsContent, sel_registerName("hasAlwaysVisibleMenuBar"), @selector(nn_falseBool));
-            Swizzle(fsContent, sel_registerName("visibleMenuBarAllowedInFullScreen"), @selector(nn_falseBool));
-        }
+        [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidEnterFullScreenNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification *note) {
+            if ([note.object isKindOfClass:[NSWindow class]]) {
+                NSWindow *w = (NSWindow *)note.object;
+                [w setLevel:NSMainMenuWindowLevel + 1];
+                [w orderFrontRegardless];
+            }
+        }];
 
-        // 6. _NSFullScreenMenuBarCompanionController (blackout curtain & toolbar)
-        Class fsCompanion = objc_getClass("_NSFullScreenMenuBarCompanionController");
-        if (fsCompanion) {
-            Swizzle(fsCompanion, sel_registerName("needsOpaqueBackstop"), @selector(nn_falseBool));
-            Swizzle(fsCompanion, sel_registerName("effectiveAutohideHeight"), @selector(nn_zeroDouble));
-            Swizzle(fsCompanion, sel_registerName("_visibleWindowHeight"), @selector(nn_zeroDouble));
-            Swizzle(fsCompanion, sel_registerName("desiredWindowHeight"), @selector(nn_zeroDouble));
-        }
+        [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidExitFullScreenNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification *note) {
+            if ([note.object isKindOfClass:[NSWindow class]]) {
+                NSWindow *w = (NSWindow *)note.object;
+                [w setLevel:NSNormalWindowLevel];
+            }
+        }];
 
-        // 7. Presentation instances (prevents setting always visible menu bar)
-        Class mbPres = objc_getClass("NSMenuBarPresentationInstance");
-        if (mbPres) {
-            Swizzle(mbPres, sel_registerName("_setHasAlwaysVisibleMenuBar:"), @selector(nn_noopWithBool:));
-        }
-        Class hiPres = objc_getClass("NSHIPresentationInstance");
-        if (hiPres) {
-            Swizzle(hiPres, sel_registerName("setHasAlwaysVisibleMenuBar:"), @selector(nn_noopWithBool:));
-        }
-
-        NSLog(@"[NoNotchLetterbox] Universal notch bypass (v2 complete) successfully activated in %s (PID %d)", getprogname(), getpid());
+        NSLog(@"[NoNotchLetterbox] Universal notch bypass (layer-elevation) successfully activated in %s (PID %d)", getprogname(), getpid());
     });
 }
