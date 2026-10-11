@@ -93,6 +93,7 @@ def inject_pid(pid):
         void* (*fn_getImp)(void*) = (void*(*)(void*))method_getImplementation;
         void* (*fn_setImp)(void*, void*) = (void*(*)(void*, void*))method_setImplementation;
         void* (*fn_blockImp)(id) = (void*(*)(id))imp_implementationWithBlock;
+        char* (*fn_strstr)(const char*, const char*) = (char*(*)(const char*, const char*))dlsym((void*)-2, "strstr");
 
         auto hook = [&](const char *clsName, const char *selName, id blk) {
             void *cls = fn_getClass(clsName);
@@ -122,6 +123,12 @@ def inject_pid(pid):
         hook("NSTitlebarContainerView", "drawsBottomDividerWhenTransparent",
              (id)^(id _self) { return (BOOL)0; });
         hook("NSTitlebarContainerView", "drawsDecorationView",
+             (id)^(id _self) { return (BOOL)0; });
+        hook("_NSTitlebarDecorationView", "drawsBottomSeparator",
+             (id)^(id _self) { return (BOOL)0; });
+        hook("_NSTitlebarDecorationView", "_updateBottomSeparatorLayer",
+             (id)^(id _self) { /* no-op */ });
+        hook("NSToolbarFullScreenWindow", "hasShadow",
              (id)^(id _self) { return (BOOL)0; });
 
         // 3. NSScreen safe area & notch bypass (zero safe area insets and zero notch rects)
@@ -186,6 +193,31 @@ def inject_pid(pid):
                  return (long)0;
              });
 
+        // Helper lambda to order out toolbar and overlay companion windows that create the 1-pixel seam
+        auto hideOverlayWindows = [&]() {
+            id curApp = ((id(*)(id, SEL))objc_msgSend)((id)fn_getClass("NSApplication"), fn_sel("sharedApplication"));
+            if (!curApp) return;
+            id allWins = ((id(*)(id, SEL))objc_msgSend)(curApp, fn_sel("windows"));
+            if (!allWins) return;
+            unsigned long wCount = ((unsigned long(*)(id, SEL))objc_msgSend)(allWins, fn_sel("count"));
+            for (unsigned long i = 0; i < wCount; i++) {
+                id curW = ((id(*)(id, SEL, unsigned long))objc_msgSend)(allWins, fn_sel("objectAtIndex:"), i);
+                if (curW) {
+                    id cNameObj = ((id(*)(id, SEL))objc_msgSend)(curW, fn_sel("className"));
+                    const char *cNameStr = cNameObj ? (const char*)((id(*)(id, SEL))objc_msgSend)(cNameObj, fn_sel("UTF8String")) : 0;
+                    if (cNameStr && (fn_strstr(cNameStr, "NSToolbarFullScreenWindow") || fn_strstr(cNameStr, "NativeWidgetMacOverlayNSWindow"))) {
+                        ((void(*)(id, SEL, SEL, id, BOOL))objc_msgSend)(
+                            curW,
+                            fn_sel("performSelectorOnMainThread:withObject:waitUntilDone:"),
+                            fn_sel("orderOut:"),
+                            nil,
+                            NO
+                        );
+                    }
+                }
+            }
+        };
+
         // 6. Hook setLevel: to automatically keep fullscreen windows elevated to layer 100
         void *clsWindow = fn_getClass("NSWindow");
         SEL sLevel = fn_sel("setLevel:");
@@ -219,6 +251,7 @@ def inject_pid(pid):
                     nil,
                     NO
                 );
+                hideOverlayWindows();
             };
             void *newImp = fn_blockImp(blkDidEnter);
             fn_setImp(mDidEnter, newImp);
@@ -254,14 +287,14 @@ def inject_pid(pid):
                         nil,
                         NO
                     );
+                    hideOverlayWindows();
                 }
             };
             void *newImp = fn_blockImp(blkSetFrame);
             fn_setImp(mSetFrame, newImp);
         }
 
-
-        // 10. Elevate any currently active fullscreen windows right now
+        // 10. Elevate any currently active fullscreen windows and hide overlay seams right now
         id app = ((id(*)(id, SEL))objc_msgSend)((id)fn_getClass("NSApplication"), fn_sel("sharedApplication"));
         if (app) {
             id windows = ((id(*)(id, SEL))objc_msgSend)(app, fn_sel("windows"));
@@ -279,6 +312,7 @@ def inject_pid(pid):
                 }
             }
         }
+        hideOverlayWindows();
 
         (void*)1;
     })
@@ -294,7 +328,45 @@ def inject_pid(pid):
     process.Detach()
     return True
 
+def run_daemon():
+    import time
+    print("[*] G9 Helper Seamless Fullscreen daemon started. Monitoring browsers and media players...", flush=True)
+    injected_pids = set()
+    failed_counts = {}
+    while True:
+        try:
+            targets = find_target_pids()
+            active_pids = {pid for pid, _ in targets}
+            injected_pids.intersection_update(active_pids)
+            for p in list(failed_counts.keys()):
+                if p not in active_pids:
+                    del failed_counts[p]
+
+            for pid, name in targets:
+                if pid not in injected_pids:
+                    f_count, last_try = failed_counts.get(pid, (0, 0))
+                    now = time.time()
+                    if f_count >= 3 and (now - last_try) < 30.0:
+                        continue
+
+                    print(f"[*] Detected target: {name} (PID {pid}), injecting seamless fullscreen...", flush=True)
+                    if inject_pid(pid):
+                        injected_pids.add(pid)
+                        if pid in failed_counts:
+                            del failed_counts[pid]
+                        print(f"    [+] Successfully injected {name} (PID {pid})", flush=True)
+                    else:
+                        failed_counts[pid] = (f_count + 1, now)
+                        print(f"    [!] Injection failed for {name} (PID {pid}) (attempt {f_count + 1})", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[!] Daemon error: {e}", file=sys.stderr, flush=True)
+        time.sleep(1.5)
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--daemon":
+        run_daemon()
+        return
+
     if len(sys.argv) > 1 and sys.argv[1] != "--all":
         try:
             pid = int(sys.argv[1])
