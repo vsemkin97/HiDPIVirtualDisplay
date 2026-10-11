@@ -74,7 +74,7 @@ fi
 
 # Build universal NoNotchLetterbox dylib and insert_dylib tool
 echo "Building NoNotchLetterbox universal dylib..."
-clang -dynamiclib -fobjc-arc -framework Cocoa \
+clang -dynamiclib -fno-objc-arc -framework Cocoa \
     -arch arm64 -arch arm64e -arch x86_64 \
     Sources/NoNotchLetterbox.m \
     -o "${RESOURCES}/NoNotchLetterbox.dylib"
