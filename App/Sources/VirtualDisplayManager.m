@@ -89,10 +89,9 @@ static CGFloat cfDictGetFixed16(CFDictionaryRef dict, CFStringRef key) {
 static inline BOOL VDMIsOurVirtualDisplay(CGDirectDisplayID d) {
     uint32_t vendor = CGDisplayVendorNumber(d);
     uint32_t model = CGDisplayModelNumber(d);
-    uint32_t serial = CGDisplaySerialNumber(d);
     if (vendor == 0x1234) return YES;
     if (vendor == 0x0610 && model == 0x0F93 && !CGDisplayIsBuiltin(d)) return YES;
-    return (serial == 0x4731 || (serial >= 0x4860 && serial <= 0x4880));
+    return NO;
 }
 
 @implementation VirtualDisplayManager
@@ -226,97 +225,131 @@ static void retainWindowIfNeeded(NSWindow *window) {
         unsigned int modeWidth = hiDPI ? width / 2 : width;
         unsigned int modeHeight = hiDPI ? height / 2 : height;
 
-        CGSize realSize = CGSizeZero;
-        if (targetDisplayID != kCGNullDirectDisplay && targetDisplayID != 0) {
-            realSize = CGDisplayScreenSize(targetDisplayID);
-        }
+        if (_notchMenuBarEnabled) {
+            if (slvDispCls && slvCfgCls && slvModeCls && slvSettingsCls) {
+                NSLog(@"VDM: Creating virtual display via SLVirtualDisplay with Apple Silicon notch support...");
 
-        struct SLVSizeFloat sizeMm;
-        if (realSize.width > 50.0f && realSize.height > 50.0f) {
-            sizeMm.width = (float)realSize.width;
-            sizeMm.height = (float)realSize.height;
-            NSLog(@"VDM: Using real physical display size: %.1fx%.1f mm", sizeMm.width, sizeMm.height);
-        } else {
-            float widthInInches = (float)modeWidth / (float)ppi;
-            float heightInInches = (float)modeHeight / (float)ppi;
-            sizeMm.width = widthInInches * 25.4f;
-            sizeMm.height = heightInInches * 25.4f;
-            NSLog(@"VDM: Calculated physical size from mode: %.1fx%.1f mm", sizeMm.width, sizeMm.height);
-        }
+                CGSize realSize = CGSizeZero;
+                if (targetDisplayID != kCGNullDirectDisplay && targetDisplayID != 0) {
+                    realSize = CGDisplayScreenSize(targetDisplayID);
+                }
 
-        if (_notchMenuBarEnabled && slvDispCls && slvCfgCls && slvModeCls && slvSettingsCls) {
-            NSLog(@"VDM: Creating virtual display via SLVirtualDisplay with Apple Silicon notch support...");
-            struct SLVSizeInt sizePx = { width, height };
-            struct SLVChromaticities chrom = {
-                { (float)redPrimary.x, (float)redPrimary.y },
-                { (float)greenPrimary.x, (float)greenPrimary.y },
-                { (float)bluePrimary.x, (float)bluePrimary.y },
-                { (float)whitePoint.x, (float)whitePoint.y }
-            };
+                struct SLVSizeFloat sizeMm;
+                if (realSize.width > 50.0f && realSize.height > 50.0f) {
+                    sizeMm.width = (float)realSize.width;
+                    sizeMm.height = (float)realSize.height;
+                    NSLog(@"VDM: Using real physical display size: %.1fx%.1f mm", sizeMm.width, sizeMm.height);
+                } else {
+                    float widthInInches = (float)modeWidth / (float)ppi;
+                    float heightInInches = (float)modeHeight / (float)ppi;
+                    sizeMm.width = widthInInches * 25.4f;
+                    sizeMm.height = heightInInches * 25.4f;
+                    NSLog(@"VDM: Calculated physical size from mode: %.1fx%.1f mm", sizeMm.width, sizeMm.height);
+                }
 
-            uint64_t serial = _notchMenuBarEnabled ? 0x4871 : 0x4870;
-            NSError *err = nil;
-            SLVirtualDisplayConfiguration *config = [[slvCfgCls alloc] initWithName:@"Color LCD"
-                                                                        vendorID:0x0610
-                                                                       productID:0x0F93
-                                                                    serialNumber:serial
-                                                               sizeInMillimeters:sizeMm
-                                                            maximumSizeInPixels:sizePx
-                                                                  chromaticities:chrom
-                                                                           error:&err];
-            // Subtype 1665 gives 40 pt menubar + native notch geometry in WindowServer!
-            config.subtype = _notchMenuBarEnabled ? 1665 : 0;
-            _descriptor = config;
+                struct SLVSizeInt sizePx = { width, height };
+                struct SLVChromaticities chrom = {
+                    { (float)redPrimary.x, (float)redPrimary.y },
+                    { (float)greenPrimary.x, (float)greenPrimary.y },
+                    { (float)bluePrimary.x, (float)bluePrimary.y },
+                    { (float)whitePoint.x, (float)whitePoint.y }
+                };
 
-            NSLog(@"VDM: Mode: %ux%u @ %.1f Hz (HiDPI=%@, NotchMenuBar=%@)",
-                  modeWidth, modeHeight, refreshRate, hiDPI ? @"YES" : @"NO", _notchMenuBarEnabled ? @"YES" : @"NO");
+                uint64_t serial = 0x4871;
+                NSString *dispName = (name && [name length] > 0) ? name : @"Color LCD";
+                _displayName = [dispName copy];
 
-            struct SLVSizeInt mPx = { width, height };
-            struct SLVSizeInt mPtNative = { width, height };
-            struct SLVSizeInt mPtHiDPI = { modeWidth, modeHeight };
+                NSError *err = nil;
+                SLVirtualDisplayConfiguration *config = [[slvCfgCls alloc] initWithName:dispName
+                                                                            vendorID:0x0610
+                                                                           productID:0x0F93
+                                                                        serialNumber:serial
+                                                                   sizeInMillimeters:sizeMm
+                                                                maximumSizeInPixels:sizePx
+                                                                      chromaticities:chrom
+                                                                               error:&err];
+                if (!config) {
+                    NSLog(@"VDM: ERROR - Failed to create SLVirtualDisplayConfiguration: %@", err);
+                    [self releaseDisplayObjects];
+                    return kCGNullDirectDisplay;
+                }
+                config.subtype = 1665;
+                _descriptor = config;
 
-            SLVirtualDisplayMode *nativeMode = [[[slvModeCls alloc] initWithSizeInPixels:mPx
-                                                                           sizeInPoints:mPtNative
-                                                                            refreshRate:(float)refreshRate
-                                                                                  error:&err] autorelease];
-            SLVirtualDisplayMode *hidpiMode = [[[slvModeCls alloc] initWithSizeInPixels:mPx
-                                                                          sizeInPoints:mPtHiDPI
-                                                                           refreshRate:(float)refreshRate
-                                                                                 error:&err] autorelease];
-            _mode = [hiDPI ? hidpiMode : nativeMode retain];
+                NSLog(@"VDM: Mode: %ux%u @ %.1f Hz (HiDPI=%@, NotchMenuBar=YES)",
+                      modeWidth, modeHeight, refreshRate, hiDPI ? @"YES" : @"NO");
 
-            NSArray *optionalModes = hiDPI ? @[nativeMode, hidpiMode] : @[nativeMode];
-            SLVirtualDisplayMode *prefMode = hiDPI ? hidpiMode : nativeMode;
+                struct SLVSizeInt mPx = { width, height };
+                struct SLVSizeInt mPtNative = { width, height };
+                struct SLVSizeInt mPtHiDPI = { modeWidth, modeHeight };
 
-            SLVirtualDisplaySettings *settings = [[slvSettingsCls alloc] initWithNativeMode:nativeMode
-                                                                      preferredMode:prefMode
-                                                                      optionalModes:optionalModes
-                                                                          rotations:1
-                                                                              error:&err];
-            _settings = settings;
+                SLVirtualDisplayMode *nativeMode = [[[slvModeCls alloc] initWithSizeInPixels:mPx
+                                                                               sizeInPoints:mPtNative
+                                                                                refreshRate:(float)refreshRate
+                                                                                      error:&err] autorelease];
+                if (!nativeMode) {
+                    NSLog(@"VDM: ERROR - Failed to create native SLVirtualDisplayMode: %@", err);
+                    [self releaseDisplayObjects];
+                    return kCGNullDirectDisplay;
+                }
 
-            SLVirtualDisplay *display = [[slvDispCls alloc] initWithConfiguration:config error:&err];
-            if (!display) {
-                NSLog(@"VDM: ERROR - Failed to create SLVirtualDisplay: %@", err);
-                [self releaseDisplayObjects];
-                return kCGNullDirectDisplay;
+                SLVirtualDisplayMode *hidpiMode = [[[slvModeCls alloc] initWithSizeInPixels:mPx
+                                                                              sizeInPoints:mPtHiDPI
+                                                                               refreshRate:(float)refreshRate
+                                                                                     error:&err] autorelease];
+                if (!hidpiMode) {
+                    NSLog(@"VDM: ERROR - Failed to create HiDPI SLVirtualDisplayMode: %@", err);
+                    [self releaseDisplayObjects];
+                    return kCGNullDirectDisplay;
+                }
+
+                _mode = [hiDPI ? hidpiMode : nativeMode retain];
+
+                NSArray *optionalModes = hiDPI ? @[nativeMode, hidpiMode] : @[nativeMode];
+                SLVirtualDisplayMode *prefMode = hiDPI ? hidpiMode : nativeMode;
+
+                SLVirtualDisplaySettings *settings = [[slvSettingsCls alloc] initWithNativeMode:nativeMode
+                                                                          preferredMode:prefMode
+                                                                          optionalModes:optionalModes
+                                                                              rotations:1
+                                                                                  error:&err];
+                if (!settings) {
+                    NSLog(@"VDM: ERROR - Failed to create SLVirtualDisplaySettings: %@", err);
+                    [self releaseDisplayObjects];
+                    return kCGNullDirectDisplay;
+                }
+                _settings = settings;
+
+                SLVirtualDisplay *display = [[slvDispCls alloc] initWithConfiguration:config error:&err];
+                if (!display) {
+                    NSLog(@"VDM: ERROR - Failed to create SLVirtualDisplay: %@", err);
+                    [self releaseDisplayObjects];
+                    return kCGNullDirectDisplay;
+                }
+                _display = display;
+
+                BOOL applied = [display applySettings:settings error:&err];
+                if (!applied) {
+                    NSLog(@"VDM: ERROR - Failed to apply SLVirtualDisplay settings: %@", err);
+                    [self releaseDisplayObjects];
+                    return kCGNullDirectDisplay;
+                }
+
+                _currentDisplayID = display.displayID;
+                NSLog(@"VDM: SLVirtualDisplay created with ID: %u", _currentDisplayID);
+                NSLog(@"VDM: ========== CREATE COMPLETE ==========");
+                return _currentDisplayID;
+            } else {
+                NSLog(@"VDM: WARNING - Notch menu bar requested but SkyLight virtual display classes (SLVirtualDisplay) are unavailable, falling back to CGVirtualDisplay");
             }
-            _display = display;
-
-            BOOL applied = [display applySettings:settings error:&err];
-            if (!applied) {
-                NSLog(@"VDM: ERROR - Failed to apply SLVirtualDisplay settings: %@", err);
-                [self releaseDisplayObjects];
-                return kCGNullDirectDisplay;
-            }
-
-            _currentDisplayID = display.displayID;
-            NSLog(@"VDM: SLVirtualDisplay created with ID: %u", _currentDisplayID);
-            NSLog(@"VDM: ========== CREATE COMPLETE ==========");
-            return _currentDisplayID;
         }
 
         // Fallback for older macOS releases:
+        // alloc/init already returns an owned (+1) reference; the extra
+        // retains this code used to add meant releaseDisplayObjects never
+        // dropped the refcount to zero, so the CGVirtualDisplay never
+        // deallocated and the virtual display survived every in-process
+        // "destroy" (the phantom-display source).
         CGVirtualDisplaySettings *settings = [[CGVirtualDisplaySettings alloc] init];
         settings.hiDPI = hiDPI ? 1 : 0;
         _settings = settings;
@@ -340,16 +373,18 @@ static void retainWindowIfNeeded(NSWindow *window) {
         descriptor.greenPrimary = greenPrimary;
         descriptor.bluePrimary = bluePrimary;
 
-        if (realSize.width > 50.0f && realSize.height > 50.0f) {
-            descriptor.sizeInMillimeters = realSize;
-        } else {
-            descriptor.sizeInMillimeters = CGSizeMake(sizeMm.width, sizeMm.height);
-        }
+        float widthInInches = (float)width / (float)ppi;
+        float heightInInches = (float)height / (float)ppi;
+        descriptor.sizeInMillimeters = CGSizeMake(widthInInches * 25.4f, heightInInches * 25.4f);
 
         descriptor.maxPixelsWide = width;
         descriptor.maxPixelsHigh = height;
         descriptor.vendorID = 0x1234;
         descriptor.productID = 0x5678;
+        // Use a fixed serial so ColorSync can reuse the same ICC profile
+        // across restarts. arc4random() was generating a new serial every time,
+        // causing ColorSync to create thousands of unique ICC profiles (4000+)
+        // which made colorsync.displayservices spin at 60%+ CPU.
         descriptor.serialNum = 0x4731;
         descriptor.terminationHandler = nil;
 
@@ -367,6 +402,12 @@ static void retainWindowIfNeeded(NSWindow *window) {
         }
         _mode = mode;
 
+        // Single-mode array — adding a 60 Hz fallback caused macOS to silently
+        // pick the fallback over the requested rate after some mirror configs,
+        // making the virtual render at 60 Hz even when the user asked for 120
+        // (the panel scanned at 120 but content only updated 60 times/sec).
+        // The caller is now responsible for clamping the requested rate to a
+        // value the panel actually supports (via maxSupportedRefreshRate).
         NSMutableArray *modes = [NSMutableArray arrayWithObject:_mode];
         _modesArray = [modes retain];
         ((CGVirtualDisplaySettings *)_settings).modes = _modesArray;
@@ -947,6 +988,8 @@ static void VDMRestorePinnedMode(CGDirectDisplayID displayID, CGDisplayModeRef m
         CGDirectDisplayID mirrorOf = CGDisplayMirrorsDisplay(displayID);
         if (mirrorOf == kCGNullDirectDisplay) continue;
         // Only break mirror sets that involve one of OUR virtual displays
+        // (vendor 0x1234 or virtual notch display). Mirroring the user configured between two of
+        // their own displays is none of our business.
         if (!VDMIsOurVirtualDisplay(mirrorOf) &&
             !VDMIsOurVirtualDisplay(displayID)) {
             NSLog(@"VDM: Leaving unrelated mirror set alone (%u mirrors %u)", displayID, mirrorOf);

@@ -28,10 +28,9 @@ func debugLog(_ message: String) {
 func isOurVirtualDisplay(_ displayID: CGDirectDisplayID) -> Bool {
     let vendor = CGDisplayVendorNumber(displayID)
     let model = CGDisplayModelNumber(displayID)
-    let serial = CGDisplaySerialNumber(displayID)
     if vendor == 0x1234 { return true }
     if vendor == 0x0610 && model == 0x0F93 && CGDisplayIsBuiltin(displayID) == 0 { return true }
-    return serial == 0x4731 || (serial >= 0x4860 && serial <= 0x4880)
+    return false
 }
 
 // MARK: - Launch Agent Manager
@@ -694,7 +693,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let kEnableNotchMenuBarKey = "enableNotchMenuBar"
     private var saveArrangementTimer: Timer?
     private var suppressArrangementSaveUntil: Date = .distantPast
-    private var wasTargetMain = false
 
     func suppressArrangementSaving(for seconds: TimeInterval = 4.0) {
         suppressArrangementSaveUntil = Date().addingTimeInterval(seconds)
@@ -779,9 +777,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.image = NSImage(systemSymbolName: "display", accessibilityDescription: "HiDPI Display")
         }
 
-        if UserDefaults.standard.object(forKey: kEnableNotchMenuBarKey) == nil && UserDefaults.standard.object(forKey: "enableWideMenuBar") != nil {
-            UserDefaults.standard.set(UserDefaults.standard.bool(forKey: "enableWideMenuBar"), forKey: kEnableNotchMenuBarKey)
-        }
         VirtualDisplayManager.shared().notchMenuBarEnabled = UserDefaults.standard.bool(forKey: kEnableNotchMenuBarKey)
 
         // Start seamless fullscreen manager for browsers and media players
@@ -2670,9 +2665,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             rebuildMenu()
             return
         }
-        let currentMain = CGMainDisplayID()
-        self.wasTargetMain = (currentMain == externalID || (self.targetExternalDisplayID != 0 && currentMain == self.targetExternalDisplayID))
-        debugLog("Using external display: \(externalID), wasTargetMain=\(self.wasTargetMain)")
+        debugLog("Using external display: \(externalID)")
         logPanelModeSummary(externalID)
 
         StatusWindowController.shared.updateStatus("Creating virtual display...")
